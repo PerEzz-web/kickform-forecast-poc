@@ -2,7 +2,8 @@ import os
 import json
 import streamlit as st
 from urllib.parse import urlparse
-from openai import OpenAI
+import openai  # for openai.__version__
+from openai import OpenAI, BadRequestError
 
 # ----------------------------
 # Defaults
@@ -202,25 +203,39 @@ if st.button("Generate texts", type="primary"):
     }
 
     with st.status("Generating…", expanded=False):
-        resp = client.responses.create(
-            model=model,
-            input=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(payload)},
-            ],
-            tools=[
-                {
-                    "type": "web_search",
-                    "filters": {"allowed_domains": allowed_domains},
-                    "search_context_size": "medium",
-                }
-            ],
-            tool_choice="required",
-            max_tool_calls=max_tool_calls,
-            reasoning={"effort": "low"},
-            max_output_tokens=1000,
-            text={"format": {"type": "json_object"}},
-        )
+        try:
+            resp = client.responses.create(
+                model=model,
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(payload)},
+                ],
+                tools=[
+                    {
+                        "type": "web_search",
+                        "filters": {"allowed_domains": allowed_domains},
+                        "search_context_size": "medium",
+                    }
+                ],
+                tool_choice="required",
+                max_tool_calls=max_tool_calls,
+                reasoning={"effort": "low"},
+                max_output_tokens=1000,
+                text={"format": {"type": "json_object"}},
+            )
+        except BadRequestError as e:
+            st.error("OpenAI request failed (BadRequest). Details below:")
+            st.caption(f"openai sdk version: {openai.__version__}")
+            st.caption(f"model: {model}")
+            st.caption(f"allowed_domains count: {len(allowed_domains)}")
+        
+            # This usually contains the actual reason (e.g., model access, invalid param, etc.)
+            if hasattr(e, "body") and e.body:
+                st.json(e.body)
+            else:
+                st.code(str(e))
+        
+            st.stop()
 
     raw = extract_response_text(resp)
 
