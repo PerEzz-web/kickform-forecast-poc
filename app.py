@@ -146,6 +146,7 @@ if st.button("Generate texts", type="primary"):
             max_tool_calls=max_tool_calls,
             reasoning={"effort": "low"},
             max_output_tokens=900
+            text={"format": {"type": "json_object"}}
         )
 
     raw = resp.output_text or ""
