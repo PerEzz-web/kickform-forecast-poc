@@ -1,2 +1,4 @@
 streamlit
 openai==2.24.0
+requests
+beautifulsoup4
