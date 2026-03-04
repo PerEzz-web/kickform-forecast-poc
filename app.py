@@ -4,7 +4,15 @@ import streamlit as st
 from urllib.parse import urlparse
 from openai import OpenAI
 
-# --- Default editable system prompt shown in the UI ---
+# ----------------------------
+# Defaults
+# ----------------------------
+
+DEFAULT_ALLOWED_DOMAINS = (
+    "fotmob.com, sofascore.com, flashscore.com, whoscored.com, soccerway.com, "
+    "fbref.com, theanalyst.com, transfermarkt.com, espn.com, onefootball.com"
+)
+
 DEFAULT_SYSTEM_PROMPT = """
 You are MatchNarrator, a football research-and-writing agent for general fans.
 
@@ -23,7 +31,7 @@ TASK:
 3) Write simple, fan-friendly explanations for the numbers.
 
 HARD RULES:
-- Output MUST NOT include links, references, citations, source names, formulas, or technical/analytics jargon.
+- Output MUST NOT include links, references/citations, source names, formulas, or technical/analytics jargon.
 - Do NOT change probabilities you extracted. Copy numbers exactly.
 - Do NOT invent injuries/lineups/transfers. If unclear, say it's not confirmed.
 - Keep it easy to read and short.
@@ -46,87 +54,61 @@ TEXT REQUIREMENTS:
 - match_goals_text: 5–9 sentences, MUST mention ALL match goals options + probabilities (bullets allowed).
 """.strip()
 
-# --- Streamlit UI ---
-st.set_page_config(page_title="Match Forecast Explainer (POC)", layout="wide")
-st.title("Match Forecast Explainer (POC)")
 
-# Optional password gate (recommended when sharing)
-app_pw = st.secrets.get("APP_PASSWORD", "")
-if app_pw:
-    entered = st.text_input("Password", type="password")
-    if entered != app_pw:
-        st.info("Enter the password to view the demo.")
-        st.stop()
+# ----------------------------
+# Helpers
+# ----------------------------
 
-match_url = st.text_input(
-    "Paste match URL (your page with forecasts)",
-    value="https://www.thepunterspage.com/kickform/premier-league/aston-villa-vs-fc-chelsea/nJBqa/"
-)
+def get_openai_client() -> OpenAI:
+    api_key = None
+    try:
+        api_key = st.secrets.get("OPENAI_API_KEY")
+    except Exception:
+        api_key = None
 
-# Your approved football sites:
-DEFAULT_ALLOWED = (
-    "fotmob.com, sofascore.com, flashscore.com, whoscored.com, soccerway.com, "
-    "fbref.com, theanalyst.com, transfermarkt.com, espn.com, onefootball.com"
-)
-
-allowed_domains_str = st.text_input(
-    "Allowed domains for web search (comma-separated)",
-    value=DEFAULT_ALLOWED
-)
-
-include_match_domain = st.checkbox(
-    "Also allow the match page’s domain (recommended, so the agent can read your forecast page)",
-    value=True
-)
-
-model = st.selectbox("Model", ["gpt-5-mini", "gpt-5.2", "gpt-5.2-pro"], index=0)
-max_tool_calls = st.slider("Max tool calls (limits browsing cost)", 1, 8, 3)
-
-system_prompt = st.text_area("System prompt (editable)", value=DEFAULT_SYSTEM_PROMPT, height=380)
-
-def get_openai_client():
-    api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+    api_key = api_key or os.getenv("OPENAI_API_KEY")
     if not api_key:
-        st.error("Missing OPENAI_API_KEY. Add it in Streamlit Secrets.")
+        st.error("Missing OPENAI_API_KEY. Add it in Streamlit Secrets (recommended) or as an environment variable.")
         st.stop()
     return OpenAI(api_key=api_key)
 
-st.caption(f"Response status: {getattr(resp, 'status', 'unknown')}")
-if not raw:
-    st.warning("No text returned. Showing debug info below (safe).")
-    st.write({
-        "status": getattr(resp, "status", None),
-        "incomplete_details": getattr(resp, "incomplete_details", None),
-        "output_items": len(getattr(resp, "output", []) or [])
-    })
 
-def normalize_domains(domains_csv: str):
-    domains = [d.strip().lower() for d in domains_csv.split(",") if d.strip()]
-    # Remove http(s) if someone pastes it
-    domains = [d.replace("https://", "").replace("http://", "").strip("/") for d in domains]
-    # Deduplicate while preserving order
-    seen, out = set(), []
+def normalize_domains(domains_csv: str) -> list[str]:
+    domains = [d.strip().lower() for d in (domains_csv or "").split(",") if d.strip()]
+    domains = [d.replace("https://", "").replace("http://", "").strip().strip("/") for d in domains]
+
+    # Remove leading www.
+    domains = [d[4:] if d.startswith("www.") else d for d in domains]
+
+    # Deduplicate, preserve order
+    seen = set()
+    out = []
     for d in domains:
         if d and d not in seen:
             seen.add(d)
             out.append(d)
     return out
 
-def extract_domain(url: str):
+
+def extract_domain(url: str) -> str:
     try:
-        host = urlparse(url).netloc.lower()
+        host = urlparse(url).netloc.lower().strip()
         host = host.replace("www.", "")
         return host
     except Exception:
         return ""
 
+
 def extract_response_text(resp) -> str:
     """
     Robustly extract assistant text even when resp.output_text is empty.
-    Also shows refusals if they happen.
     """
-    parts = []
+    # First try the convenience property if present
+    t = getattr(resp, "output_text", None)
+    if isinstance(t, str) and t.strip():
+        return t.strip()
 
+    parts = []
     output = getattr(resp, "output", None) or []
     for item in output:
         if getattr(item, "type", None) != "message":
@@ -141,18 +123,77 @@ def extract_response_text(resp) -> str:
 
     return "\n".join([p for p in parts if p]).strip()
 
+
+def stars(n: int) -> str:
+    n = int(n or 0)
+    n = max(0, min(5, n))
+    return "★" * n + "☆" * (5 - n)
+
+
+# ----------------------------
+# UI
+# ----------------------------
+
+st.set_page_config(page_title="Match Forecast Explainer (POC)", layout="wide")
+st.title("Match Forecast Explainer (POC)")
+
+# Optional password gate
+app_pw = ""
+try:
+    app_pw = st.secrets.get("APP_PASSWORD", "") or ""
+except Exception:
+    app_pw = os.getenv("APP_PASSWORD", "") or ""
+
+if app_pw:
+    entered = st.text_input("Password", type="password")
+    if entered != app_pw:
+        st.info("Enter the password to view the demo.")
+        st.stop()
+
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    match_url = st.text_input(
+        "Match URL (page that contains your forecasts)",
+        value="https://www.thepunterspage.com/kickform/premier-league/aston-villa-vs-fc-chelsea/nJBqa/"
+    )
+
+    allowed_domains_str = st.text_input(
+        "Allowed domains for web search (comma-separated)",
+        value=DEFAULT_ALLOWED_DOMAINS
+    )
+
+    include_match_domain = st.checkbox(
+        "Also allow the match page’s domain (recommended so the agent can read your forecast page)",
+        value=True
+    )
+
+    model = st.selectbox("Model", ["gpt-5-mini", "gpt-5.2", "gpt-5.2-pro"], index=0)
+    max_tool_calls = st.slider("Max tool calls (limits browsing cost)", 1, 10, 5)
+
+with col2:
+    system_prompt = st.text_area("System prompt (editable)", value=DEFAULT_SYSTEM_PROMPT, height=430)
+
+st.divider()
+
 if st.button("Generate texts", type="primary"):
     if not match_url.strip():
         st.warning("Please paste a match URL.")
         st.stop()
 
+    # Build allowlist
     allowed_domains = normalize_domains(allowed_domains_str)
 
     if include_match_domain:
         match_domain = extract_domain(match_url)
         if match_domain and match_domain not in allowed_domains:
-            allowed_domains = [match_domain] + allowed_domains  # ensure match page is reachable
+            allowed_domains = [match_domain] + allowed_domains
 
+    if not allowed_domains:
+        st.warning("Allowed domains list is empty. Add at least one domain.")
+        st.stop()
+
+    # Create OpenAI client
     client = get_openai_client()
 
     payload = {
@@ -165,21 +206,39 @@ if st.button("Generate texts", type="primary"):
             model=model,
             input=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(payload)}
+                {"role": "user", "content": json.dumps(payload)},
             ],
-            tools=[{
-                "type": "web_search",
-                "filters": {"allowed_domains": allowed_domains},
-                "search_context_size": "medium"
-            }],
+            tools=[
+                {
+                    "type": "web_search",
+                    "filters": {"allowed_domains": allowed_domains},
+                    "search_context_size": "medium",
+                }
+            ],
             tool_choice="required",
             max_tool_calls=max_tool_calls,
             reasoning={"effort": "low"},
-            max_output_tokens=900,
-            text={"format": {"type": "json_object"}}
+            max_output_tokens=1000,
+            text={"format": {"type": "json_object"}},
         )
 
     raw = extract_response_text(resp)
+
+    # Debug/status info (safe)
+    st.caption(f"Response status: {getattr(resp, 'status', 'unknown')}")
+
+    if not raw:
+        st.warning("No text returned. Debug info below:")
+        st.write(
+            {
+                "status": getattr(resp, "status", None),
+                "incomplete_details": getattr(resp, "incomplete_details", None),
+                "output_items": len(getattr(resp, "output", []) or []),
+            }
+        )
+        st.stop()
+
+    # Parse JSON
     try:
         result = json.loads(raw)
     except Exception:
@@ -187,6 +246,7 @@ if st.button("Generate texts", type="primary"):
         st.code(raw)
         st.stop()
 
+    # Render outputs
     st.subheader("1) Whole match (general expectation)")
     st.write(result.get("match_text", ""))
 
@@ -201,3 +261,7 @@ if st.button("Generate texts", type="primary"):
 
     st.subheader("5) Match Goals Probability (all options)")
     st.write(result.get("match_goals_text", ""))
+
+    # Optional: show parsed JSON for debugging
+    with st.expander("Debug (parsed JSON)"):
+        st.json(result)
