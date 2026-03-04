@@ -55,6 +55,11 @@ TEXT REQUIREMENTS:
 - match_goals_text: 5–9 sentences, MUST mention ALL match goals options + probabilities (bullets allowed).
 """.strip()
 
+# Token budgets:
+# Call #1 includes web_search (can burn output tokens on tool-calling/reasoning).
+# Call #2 is "finish": no tools, JSON mode ON, just produces final JSON.
+MAX_OUTPUT_TOKENS_SEARCH = 2200
+MAX_OUTPUT_TOKENS_FINISH = 1400
 
 # ----------------------------
 # Helpers
@@ -150,6 +155,14 @@ def extract_json_object(text: str):
     return None
 
 
+def safe_incomplete_details(resp):
+    val = getattr(resp, "incomplete_details", None)
+    try:
+        return str(val)
+    except Exception:
+        return val
+
+
 # ----------------------------
 # UI
 # ----------------------------
@@ -189,7 +202,9 @@ with col1:
     )
 
     model = st.selectbox("Model", ["gpt-5-mini", "gpt-5.2", "gpt-5.2-pro"], index=0)
-    max_tool_calls = st.slider("Max tool calls (limits browsing cost)", 1, 10, 5)
+
+    # Keep this low to avoid tool-call explosion (cost + token usage)
+    max_tool_calls = st.slider("Max tool calls (limits browsing cost)", 1, 8, 3)
 
 with col2:
     system_prompt = st.text_area("System prompt (editable)", value=DEFAULT_SYSTEM_PROMPT, height=430)
@@ -213,7 +228,6 @@ if st.button("Generate texts", type="primary"):
         st.warning("Allowed domains list is empty. Add at least one domain.")
         st.stop()
 
-    # Create OpenAI client
     client = get_openai_client()
 
     payload = {
@@ -221,17 +235,20 @@ if st.button("Generate texts", type="primary"):
         "allowed_domains": allowed_domains,
     }
 
-    # IMPORTANT: Can't use JSON mode with web_search.
-    # So we enforce "JSON only" via prompt + robust parsing.
+    # Phase 1: web_search (NO JSON mode allowed with web_search)
     system_prompt_runtime = (
         system_prompt.strip()
-        + "\n\nIMPORTANT: Output ONLY a single JSON object and nothing else. "
-          "No markdown. No extra text before or after."
+        + "\n\nSEARCH BUDGET: Use as few web searches as possible. Stop searching as soon as you have the needed info."
+        + "\n\nIMPORTANT: Output ONLY a single JSON object and nothing else. No markdown."
     )
 
-    with st.status("Generating…", expanded=False):
+    resp1 = None
+    resp2 = None
+    raw = ""
+
+    with st.status("Step 1/2: Browsing and collecting info…", expanded=False):
         try:
-            resp = client.responses.create(
+            resp1 = client.responses.create(
                 model=model,
                 input=[
                     {"role": "system", "content": system_prompt_runtime},
@@ -241,13 +258,13 @@ if st.button("Generate texts", type="primary"):
                     {
                         "type": "web_search",
                         "filters": {"allowed_domains": allowed_domains},
-                        "search_context_size": "medium",
+                        "search_context_size": "small",  # reduces context bloat + cost
                     }
                 ],
                 tool_choice="required",
                 max_tool_calls=max_tool_calls,
                 reasoning={"effort": "low"},
-                max_output_tokens=1000,
+                max_output_tokens=MAX_OUTPUT_TOKENS_SEARCH,
             )
         except BadRequestError as e:
             st.error("OpenAI request failed (BadRequest). Details below:")
@@ -260,27 +277,64 @@ if st.button("Generate texts", type="primary"):
                 st.code(str(e))
             st.stop()
 
-    raw = extract_response_text(resp)
+    raw = extract_response_text(resp1) if resp1 else ""
+    status1 = getattr(resp1, "status", "unknown") if resp1 else "unknown"
 
-    # Debug/status info (safe)
-    st.caption(f"Response status: {getattr(resp, 'status', 'unknown')}")
+    st.caption(f"Step 1 status: {status1}")
+    if status1 == "incomplete":
+        st.caption(f"Step 1 incomplete_details: {safe_incomplete_details(resp1)}")
 
-    if not raw:
-        st.warning("No text returned. Debug info below:")
-        st.write(
-            {
-                "status": getattr(resp, "status", None),
-                "incomplete_details": getattr(resp, "incomplete_details", None),
-                "output_items": len(getattr(resp, "output", []) or []),
-            }
-        )
-        st.stop()
-
+    # Try parsing JSON from step 1 (sometimes it succeeds)
     result = extract_json_object(raw)
-    if not result:
-        st.error("Could not parse JSON from the model output. Raw output below:")
-        st.code(raw)
-        st.stop()
+
+    # If step 1 produced nothing or was incomplete, do a finish call
+    need_finish = (not result) or (status1 == "incomplete") or (not raw)
+
+    if need_finish:
+        with st.status("Step 2/2: Finishing the JSON output…", expanded=False):
+            try:
+                resp2 = client.responses.create(
+                    model=model,
+                    previous_response_id=getattr(resp1, "id", None),
+                    input=[
+                        {
+                            "role": "system",
+                            "content": (
+                                system_prompt.strip()
+                                + "\n\nIMPORTANT: Do NOT browse the web now. "
+                                  "Using ONLY what you already gathered, output ONLY the final JSON object."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": "Return the final JSON now. No extra text.",
+                        },
+                    ],
+                    # No tools here -> JSON mode is allowed and reliable
+                    text={"format": {"type": "json_object"}},
+                    reasoning={"effort": "low"},
+                    max_output_tokens=MAX_OUTPUT_TOKENS_FINISH,
+                )
+            except BadRequestError as e:
+                st.error("OpenAI request failed (BadRequest) during finish step. Details below:")
+                st.caption(f"openai sdk version: {openai.__version__}")
+                if hasattr(e, "body") and e.body:
+                    st.json(e.body)
+                else:
+                    st.code(str(e))
+                st.stop()
+
+        raw2 = extract_response_text(resp2) if resp2 else ""
+        status2 = getattr(resp2, "status", "unknown") if resp2 else "unknown"
+        st.caption(f"Step 2 status: {status2}")
+        if status2 == "incomplete":
+            st.caption(f"Step 2 incomplete_details: {safe_incomplete_details(resp2)}")
+
+        result = extract_json_object(raw2)
+        if not result:
+            st.error("Could not parse JSON from the model output. Raw output below:")
+            st.code(raw2)
+            st.stop()
 
     # Render outputs
     st.subheader("1) Whole match (general expectation)")
