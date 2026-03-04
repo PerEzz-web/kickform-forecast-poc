@@ -258,7 +258,7 @@ if st.button("Generate texts", type="primary"):
                     {
                         "type": "web_search",
                         "filters": {"allowed_domains": allowed_domains},
-                        "search_context_size": "small",  # reduces context bloat + cost
+                        "search_context_size": "low",  # reduces context bloat + cost
                     }
                 ],
                 tool_choice="required",
