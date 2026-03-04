@@ -111,6 +111,27 @@ def extract_domain(url: str):
     except Exception:
         return ""
 
+def extract_response_text(resp) -> str:
+    """
+    Robustly extract assistant text even when resp.output_text is empty.
+    Also shows refusals if they happen.
+    """
+    parts = []
+
+    output = getattr(resp, "output", None) or []
+    for item in output:
+        if getattr(item, "type", None) != "message":
+            continue
+        content = getattr(item, "content", None) or []
+        for c in content:
+            ctype = getattr(c, "type", None)
+            if ctype in ("output_text", "text"):
+                parts.append(getattr(c, "text", "") or "")
+            elif ctype == "refusal":
+                parts.append(getattr(c, "refusal", "") or "")
+
+    return "\n".join([p for p in parts if p]).strip()
+
 if st.button("Generate texts", type="primary"):
     if not match_url.strip():
         st.warning("Please paste a match URL.")
@@ -149,7 +170,7 @@ if st.button("Generate texts", type="primary"):
             text={"format": {"type": "json_object"}}
         )
 
-    raw = resp.output_text or ""
+    raw = extract_response_text(resp)
     try:
         result = json.loads(raw)
     except Exception:
