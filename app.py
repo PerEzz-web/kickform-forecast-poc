@@ -175,7 +175,7 @@ if st.button("Generate texts", type="primary"):
             tool_choice="required",
             max_tool_calls=max_tool_calls,
             reasoning={"effort": "low"},
-            max_output_tokens=900
+            max_output_tokens=900,
             text={"format": {"type": "json_object"}}
         )
 
