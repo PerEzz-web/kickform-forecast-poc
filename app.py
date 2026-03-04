@@ -2,7 +2,7 @@ import os
 import json
 import streamlit as st
 from urllib.parse import urlparse
-import openai  # for openai.__version__
+import openai  # for version display in errors
 from openai import OpenAI, BadRequestError
 
 # ----------------------------
@@ -38,7 +38,7 @@ HARD RULES:
 - Keep it easy to read and short.
 
 OUTPUT:
-Return ONLY valid JSON with exactly these keys (string values):
+Return ONLY a single JSON object with exactly these keys (string values):
 {
   "match_text": "...",
   "value_tip_text": "...",
@@ -77,11 +77,9 @@ def get_openai_client() -> OpenAI:
 def normalize_domains(domains_csv: str) -> list[str]:
     domains = [d.strip().lower() for d in (domains_csv or "").split(",") if d.strip()]
     domains = [d.replace("https://", "").replace("http://", "").strip().strip("/") for d in domains]
+    domains = [d[4:] if d.startswith("www.") else d for d in domains]  # drop leading www.
 
-    # Remove leading www.
-    domains = [d[4:] if d.startswith("www.") else d for d in domains]
-
-    # Deduplicate, preserve order
+    # Deduplicate while preserving order
     seen = set()
     out = []
     for d in domains:
@@ -104,7 +102,6 @@ def extract_response_text(resp) -> str:
     """
     Robustly extract assistant text even when resp.output_text is empty.
     """
-    # First try the convenience property if present
     t = getattr(resp, "output_text", None)
     if isinstance(t, str) and t.strip():
         return t.strip()
@@ -125,10 +122,32 @@ def extract_response_text(resp) -> str:
     return "\n".join([p for p in parts if p]).strip()
 
 
-def stars(n: int) -> str:
-    n = int(n or 0)
-    n = max(0, min(5, n))
-    return "★" * n + "☆" * (5 - n)
+def extract_json_object(text: str):
+    """
+    Attempts to extract the first top-level JSON object from a string.
+    Returns dict on success, None on failure.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+
+    # Already pure JSON?
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    # Try to locate a {...} block
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end + 1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            return None
+
+    return None
 
 
 # ----------------------------
@@ -199,15 +218,23 @@ if st.button("Generate texts", type="primary"):
 
     payload = {
         "match_url": match_url,
-        "allowed_domains": allowed_domains
+        "allowed_domains": allowed_domains,
     }
+
+    # IMPORTANT: Can't use JSON mode with web_search.
+    # So we enforce "JSON only" via prompt + robust parsing.
+    system_prompt_runtime = (
+        system_prompt.strip()
+        + "\n\nIMPORTANT: Output ONLY a single JSON object and nothing else. "
+          "No markdown. No extra text before or after."
+    )
 
     with st.status("Generating…", expanded=False):
         try:
             resp = client.responses.create(
                 model=model,
                 input=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": system_prompt_runtime},
                     {"role": "user", "content": json.dumps(payload)},
                 ],
                 tools=[
@@ -221,20 +248,16 @@ if st.button("Generate texts", type="primary"):
                 max_tool_calls=max_tool_calls,
                 reasoning={"effort": "low"},
                 max_output_tokens=1000,
-                text={"format": {"type": "json_object"}},
             )
         except BadRequestError as e:
             st.error("OpenAI request failed (BadRequest). Details below:")
             st.caption(f"openai sdk version: {openai.__version__}")
             st.caption(f"model: {model}")
             st.caption(f"allowed_domains count: {len(allowed_domains)}")
-        
-            # This usually contains the actual reason (e.g., model access, invalid param, etc.)
             if hasattr(e, "body") and e.body:
                 st.json(e.body)
             else:
                 st.code(str(e))
-        
             st.stop()
 
     raw = extract_response_text(resp)
@@ -253,11 +276,9 @@ if st.button("Generate texts", type="primary"):
         )
         st.stop()
 
-    # Parse JSON
-    try:
-        result = json.loads(raw)
-    except Exception:
-        st.error("Model did not return valid JSON. Raw output below:")
+    result = extract_json_object(raw)
+    if not result:
+        st.error("Could not parse JSON from the model output. Raw output below:")
         st.code(raw)
         st.stop()
 
@@ -277,6 +298,5 @@ if st.button("Generate texts", type="primary"):
     st.subheader("5) Match Goals Probability (all options)")
     st.write(result.get("match_goals_text", ""))
 
-    # Optional: show parsed JSON for debugging
     with st.expander("Debug (parsed JSON)"):
         st.json(result)
