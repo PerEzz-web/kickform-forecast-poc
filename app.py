@@ -91,6 +91,15 @@ def get_openai_client():
         st.stop()
     return OpenAI(api_key=api_key)
 
+st.caption(f"Response status: {getattr(resp, 'status', 'unknown')}")
+if not raw:
+    st.warning("No text returned. Showing debug info below (safe).")
+    st.write({
+        "status": getattr(resp, "status", None),
+        "incomplete_details": getattr(resp, "incomplete_details", None),
+        "output_items": len(getattr(resp, "output", []) or [])
+    })
+
 def normalize_domains(domains_csv: str):
     domains = [d.strip().lower() for d in domains_csv.split(",") if d.strip()]
     # Remove http(s) if someone pastes it
